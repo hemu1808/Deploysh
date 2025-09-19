@@ -1,0 +1,5 @@
+{
+  "name": "AuraDeploy Dashboard",
+  "description": "A lightweight, self-healing deployment platform dashboard. Monitor application health, manage scaling, and view real-time logs and metrics from a centralized interface.",
+  "requestFramePermissions": []
+}
