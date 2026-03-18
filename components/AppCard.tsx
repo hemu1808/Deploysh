@@ -25,12 +25,13 @@ const AppCard: React.FC<AppCardProps> = ({ app, onScale, onRemove, onViewDetails
   const lastMem = app.memoryUsage[app.memoryUsage.length - 1]?.value ?? 0;
 
   return (
-    <div className="bg-gray-800 rounded-lg shadow-lg overflow-hidden flex flex-col transition-all duration-300 hover:shadow-2xl hover:-translate-y-1">
+    <div className="glass-card rounded-xl overflow-hidden flex flex-col transition-all duration-300 hover:-translate-y-2 hover:shadow-[0_8px_30px_rgba(56,189,248,0.15)] group relative">
+      <div className="absolute inset-0 bg-gradient-to-br from-brand-blue/5 to-brand-purple/5 opacity-0 group-hover:opacity-100 transition-opacity duration-500 pointer-events-none"></div>
       <div className="p-5 flex-grow">
         <div className="flex justify-between items-start">
             <div className="flex-1 min-w-0">
-                <h3 className="text-lg font-bold text-gray-200 truncate">{app.name}</h3>
-                <p className="text-sm text-gray-500 truncate">{app.dockerImage}</p>
+                <h3 className="text-lg font-bold text-slate-100 truncate tracking-wide">{app.name}</h3>
+                <p className="text-xs text-brand-blue/80 font-mono truncate mt-1 bg-brand-blue/10 px-2 py-0.5 rounded-full inline-block">{app.dockerImage}</p>
             </div>
             <StatusIndicator status={app.status} />
         </div>
@@ -46,22 +47,25 @@ const AppCard: React.FC<AppCardProps> = ({ app, onScale, onRemove, onViewDetails
             </div>
         </div>
         
-        <div className="mt-4">
-            <span className="text-gray-500 text-sm">Replicas</span>
-            <div className="flex items-center space-x-3 mt-1">
-                 <button onClick={handleScaleDown} className="p-1 rounded-full bg-gray-700 hover:bg-gray-600 disabled:opacity-50" disabled={app.replicas.target <= 0}>
-                    <MinusIcon className="w-4 h-4 text-gray-300" />
+        <div className="mt-5 border-t border-glass-border pt-4">
+            <span className="text-slate-400 text-xs font-semibold uppercase tracking-wider">Replicas</span>
+            <div className="flex items-center space-x-4 mt-2">
+                 <button onClick={handleScaleDown} className="p-1.5 rounded-full bg-slate-800/50 border border-glass-border hover:bg-slate-700/80 hover:border-brand-blue/30 transition-all disabled:opacity-30 disabled:hover:border-glass-border" disabled={app.replicas.target <= 0}>
+                    <MinusIcon className="w-3.5 h-3.5 text-slate-300" />
                 </button>
-                <span className="font-semibold text-gray-200 text-lg w-12 text-center">{app.replicas.current} / {app.replicas.target}</span>
-                <button onClick={handleScaleUp} className="p-1 rounded-full bg-gray-700 hover:bg-gray-600">
-                    <PlusIcon className="w-4 h-4 text-gray-300" />
+                <div className="flex flex-col items-center justify-center w-14">
+                  <span className="font-bold text-slate-100 text-xl leading-none">{app.replicas.current}</span>
+                  <span className="text-[10px] text-slate-500 font-mono mt-0.5">/ {app.replicas.target} TGT</span>
+                </div>
+                <button onClick={handleScaleUp} className="p-1.5 rounded-full bg-slate-800/50 border border-glass-border hover:bg-slate-700/80 hover:border-brand-blue/30 transition-all">
+                    <PlusIcon className="w-3.5 h-3.5 text-slate-300" />
                 </button>
             </div>
         </div>
       </div>
       
-      <div className="bg-gray-700/50 px-5 py-3 flex items-center justify-between">
-         <button onClick={() => onViewDetails(app)} className="inline-flex items-center text-sm text-blue-400 hover:text-blue-300 font-semibold">
+      <div className="glass-panel border-x-0 border-b-0 px-5 py-3.5 flex items-center justify-between z-10">
+         <button onClick={() => onViewDetails(app)} className="inline-flex items-center text-sm text-brand-blue hover:text-brand-purple transition-colors font-semibold">
             <ExternalLinkIcon className="w-4 h-4 mr-2" />
             View Details
         </button>

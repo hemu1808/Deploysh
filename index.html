@@ -11,24 +11,53 @@
         theme: {
           extend: {
             colors: {
-              'gray-900': '#1a202c',
-              'gray-800': '#2d3748',
-              'gray-700': '#4a5568',
-              'gray-600': '#718096',
-              'gray-500': '#a0aec0',
-              'gray-400': '#cbd5e0',
-              'blue-500': '#4299e1',
-              'green-500': '#48bb78',
-              'yellow-500': '#ecc94b',
-              'red-500': '#f56565',
+              'glass-dark': 'rgba(15, 23, 42, 0.4)',
+              'glass-border': 'rgba(255, 255, 255, 0.08)',
+              'brand-blue': '#38bdf8',
+              'brand-purple': '#818cf8',
             },
             animation: {
               'pulse-fast': 'pulse 1s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+              'float': 'float 6s ease-in-out infinite',
+            },
+            keyframes: {
+              float: {
+                '0%, 100%': { transform: 'translateY(0)' },
+                '50%': { transform: 'translateY(-10px)' },
+              }
             }
           }
         }
       }
     </script>
+    <style>
+      @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+      body {
+        font-family: 'Inter', sans-serif;
+        background: radial-gradient(circle at top right, #1e1b4b, #0f172a 40%, #020617);
+        color: #e2e8f0;
+        min-height: 100vh;
+      }
+      .glass-panel {
+        background: rgba(30, 41, 59, 0.4);
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+      }
+      .glass-card {
+        background: linear-gradient(135deg, rgba(30, 41, 59, 0.5) 0%, rgba(15, 23, 42, 0.8) 100%);
+        backdrop-filter: blur(16px);
+        -webkit-backdrop-filter: blur(16px);
+        border: 1px solid rgba(255, 255, 255, 0.05);
+        box-shadow: 0 4px 30px rgba(0, 0, 0, 0.5);
+      }
+      
+      /* Webkit scrollbar customization */
+      ::-webkit-scrollbar { width: 8px; height: 8px; }
+      ::-webkit-scrollbar-track { background: transparent; }
+      ::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.1); border-radius: 4px; }
+      ::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.2); }
+    </style>
   <script type="importmap">
 {
   "imports": {
@@ -41,7 +70,7 @@
 </script>
 <link rel="stylesheet" href="/index.css">
 </head>
-  <body class="bg-gray-900 text-gray-400">
+  <body class="antialiased selection:bg-brand-blue selection:text-slate-900">
     <div id="root"></div>
   <script type="module" src="/index.tsx"></script>
 </body>

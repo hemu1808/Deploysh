@@ -11,6 +11,16 @@ export interface Metric {
   value: number;
 }
 
+export interface EnvVar {
+  key: string;
+  value: string;
+}
+
+export interface PortMapping {
+  hostPort: number;
+  containerPort: number;
+}
+
 export interface Application {
   id: string;
   name: string;
@@ -23,5 +33,7 @@ export interface Application {
   cpuUsage: Metric[];
   memoryUsage: Metric[];
   logs: string[];
+  envVars?: EnvVar[];
+  ports?: PortMapping[];
   createdAt: number;
 }
