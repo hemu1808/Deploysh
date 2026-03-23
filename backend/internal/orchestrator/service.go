@@ -8,7 +8,9 @@ import (
 
 	"github.com/hemu1808/auradeploy/backend/internal/cri"
 	"github.com/hemu1808/auradeploy/backend/internal/models"
+	"github.com/hemu1808/auradeploy/backend/internal/scheduler"
 	"github.com/hemu1808/auradeploy/backend/internal/store"
+	"github.com/opencontainers/runtime-spec/specs-go"
 	"log/slog"
 )
 
@@ -20,25 +22,46 @@ type Orchestrator interface {
 	JoinCluster(nodeID, bindAddr string) error
 	Subscribe(subscriber chan []models.Application)
 	Unsubscribe(subscriber chan []models.Application)
+	GetRoles() map[string]models.Role
+	GetRoleBindings() map[string]models.RoleBinding
 }
 
 func (o *RaftOrchestrator) JoinCluster(nodeID, bindAddr string) error {
-	return o.store.Join(nodeID, bindAddr)
+	err := o.store.Join(nodeID, bindAddr)
+	if err == nil && o.store.IsLeader() {
+		o.store.SetNode(models.DefaultNode(nodeID, bindAddr))
+	}
+	return err
+}
+
+func (o *RaftOrchestrator) GetRoles() map[string]models.Role {
+	return o.store.GetRoles()
+}
+
+func (o *RaftOrchestrator) GetRoleBindings() map[string]models.RoleBinding {
+	return o.store.GetRoleBindings()
 }
 
 type RaftOrchestrator struct {
 	mu          sync.RWMutex
+	nodeID      string
 	store       *store.Store
 	criClient   *cri.Client
+	scheduler   *scheduler.Scheduler
 	subscribers map[chan []models.Application]struct{}
 	logger      *slog.Logger
 	running     map[string]models.Application // keeps track of what this node is actually running
 }
 
-func NewRaftOrchestrator(store *store.Store, criClient *cri.Client, logger *slog.Logger) *RaftOrchestrator {
+func NewRaftOrchestrator(nodeID string, store *store.Store, criClient *cri.Client, logger *slog.Logger) *RaftOrchestrator {
+	sched := scheduler.NewScheduler(store, logger)
+	sched.Start()
+
 	orch := &RaftOrchestrator{
+		nodeID:      nodeID,
 		store:       store,
 		criClient:   criClient,
+		scheduler:   sched,
 		subscribers: make(map[chan []models.Application]struct{}),
 		running:     make(map[string]models.Application),
 		logger:      logger,
@@ -178,16 +201,43 @@ func (o *RaftOrchestrator) watchStateLoop() {
 	for range ticker.C {
 		apps := o.store.GetApplications()
 		
-		// 1. Check for new apps to run locally
-		// In a real system the scheduler assigns nodes. Here we blindly run everything.
+		// 1. Check for new apps to run locally based on Placements
 		for id, app := range apps {
-			if _, running := o.running[id]; !running {
+			isPlacedHere := false
+			for _, nID := range app.Placements {
+				if nID == o.nodeID {
+					isPlacedHere = true
+					break
+				}
+			}
+
+			if _, running := o.running[id]; !running && isPlacedHere {
 				o.logger.Info("New app detected in state, spinning up via CRI", "id", id)
 				
 				// Optional: Set status to Deploying via raft if we are leader
 				
+				// Resolve volume mounts
+				pvcs := o.store.GetPVCs()
+				pvs := o.store.GetPVs()
+				var ociMounts []specs.Mount
+				for _, mount := range app.VolumeMounts {
+					pvc, ok := pvcs[mount.ClaimID]
+					if ok && pvc.Phase == models.VolumeBound {
+						pv, ok := pvs[pvc.VolumeID]
+						// Safety check: is it meant for this node?
+						if ok && pv.NodeID == o.nodeID {
+							ociMounts = append(ociMounts, specs.Mount{
+								Destination: mount.MountPath,
+								Type:        "bind",
+								Source:      pv.HostPath,
+								Options:     []string{"rbind", "rw"},
+							})
+						}
+					}
+				}
+
 				if o.criClient != nil {
-					err := o.criClient.RunContainer(app)
+					err := o.criClient.RunContainer(app, ociMounts)
 					if err != nil {
 						o.logger.Error("Failed to run container", "id", id, "error", err)
 						// Update Raft state
@@ -240,7 +290,18 @@ func (o *RaftOrchestrator) watchStateLoop() {
 
 		// 2. Check for apps deleted from state that are still running locally
 		for id := range o.running {
-			if _, exists := apps[id]; !exists {
+			app, exists := apps[id]
+			isPlacedHere := false
+			if exists {
+				for _, nID := range app.Placements {
+					if nID == o.nodeID {
+						isPlacedHere = true
+						break
+					}
+				}
+			}
+
+			if !exists || !isPlacedHere {
 				o.logger.Info("App deleted from state, stopping via CRI", "id", id)
 				if o.criClient != nil {
 					err := o.criClient.StopContainer(id)
@@ -249,6 +310,14 @@ func (o *RaftOrchestrator) watchStateLoop() {
 					}
 				}
 				delete(o.running, id)
+			}
+		}
+
+		// 3. Register self in state if leader (fallback)
+		if o.store.IsLeader() {
+			nodes := o.store.GetNodes()
+			if _, ok := nodes[o.nodeID]; !ok {
+				o.store.SetNode(models.DefaultNode(o.nodeID, "localhost"))
 			}
 		}
 

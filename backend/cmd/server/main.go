@@ -2,13 +2,19 @@ package main
 
 import (
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/hemu1808/auradeploy/backend/internal/api"
 	"github.com/hemu1808/auradeploy/backend/internal/cri"
+	"github.com/hemu1808/auradeploy/backend/internal/gitops"
+	"github.com/hemu1808/auradeploy/backend/internal/network"
+	"github.com/hemu1808/auradeploy/backend/internal/observability"
 	"github.com/hemu1808/auradeploy/backend/internal/orchestrator"
+	"github.com/hemu1808/auradeploy/backend/internal/storage"
 	"github.com/hemu1808/auradeploy/backend/internal/store"
 	"github.com/rs/cors"
 )
@@ -39,6 +45,15 @@ func main() {
 		bootstrap = bootstrapEnv == "true"
 	}
 
+	httpPort := os.Getenv("PORT")
+	if httpPort == "" {
+		httpPort = "8080"
+	}
+	dnsPort := 1053
+	if p, err := strconv.Atoi(httpPort); err == nil {
+		dnsPort = 1053 + (p - 8080)
+	}
+
 	// 2. Initialize Raft Store
 	storeNode, err := store.NewStore(nodeID, bindAddr, raftDir, bootstrap)
 	if err != nil {
@@ -49,7 +64,24 @@ func main() {
 	// Wait for leader election (simple sleep for demo, ideally we'd watch leader chan)
 	time.Sleep(3 * time.Second)
 
-	// 3. Initialize CRI Client (Fallback gracefully if running on Windows without containerd)
+	// 3. Initialize Network & IPAM (CIDR: 10.244.0.0/16)
+	ipam, err := network.NewIPAM(nodeID, "10.244.0.0/16")
+	if err != nil {
+		slog.Error("Failed to initialize IPAM", "error", err)
+	} else {
+		// Initialize the bridge and VXLAN on the host (Linux only)
+		err = network.SetupNodeNetwork(net.ParseIP("127.0.0.1"), ipam.GetGatewayIP(), ipam.GetNodeSubnet())
+		if err != nil {
+			slog.Warn("Node CNI setup skipped or failed", "reason", err)
+		} else {
+			slog.Info("Node CNI setup successful (Bridge/VXLAN overlay)")
+		}
+	}
+
+	// Start Dummy DNS Server for Service Discovery (Port 1053 to avoid requiring root)
+	network.StartDNSServer(dnsPort, logger)
+
+	// 4. Initialize CRI Client (Fallback gracefully if running on Windows without containerd)
 	criSock := os.Getenv("CRI_SOCK")
 	if criSock == "" {
 		criSock = "/run/containerd/containerd.sock"
@@ -60,7 +92,7 @@ func main() {
 	}
 
 	var criClient *cri.Client
-	criClient, err = cri.NewClient(criSock, criNamespace, logger)
+	criClient, err = cri.NewClient(criSock, criNamespace, ipam, logger)
 	if err != nil {
 		slog.Warn("Failed to connect to containerd plugin. Falling back to simulation mode.", "error", err, "socket", criSock)
 		criClient = nil
@@ -68,36 +100,61 @@ func main() {
 		slog.Info("Connected to containerd.", "namespace", criNamespace)
 	}
 
-	// 4. Initialize Raft Orchestrator
-	orch := orchestrator.NewRaftOrchestrator(storeNode, criClient, logger)
+	// 5. Initialize Raft Orchestrator
+	orch := orchestrator.NewRaftOrchestrator(nodeID, storeNode, criClient, logger)
 	slog.Info("Initialized Raft Orchestrator.", "nodeID", nodeID, "addr", bindAddr)
 
-	// 4. Initialize API Handlers
-	handler := api.NewHandler(orch)
+	// 6. Initialize Storage Provisioner (CSI)
+	csidefDir := os.Getenv("STORAGE_DIR")
+	if csidefDir == "" {
+		csidefDir = "./volumes-" + nodeID
+	}
+	_ = os.MkdirAll(csidefDir, 0755)
+	provisioner := storage.NewProvisioner(storeNode, logger, csidefDir)
+	provisioner.Start()
+	slog.Info("Started Local Volume Provisioner", "dir", csidefDir)
 
-	// 5. Setup Routing
+	// 7. Initialize API Handlers
+	handler := api.NewHandler(orch)
+	gitOpsReconciler := gitops.NewReconciler(orch, logger)
+	gitOpsHandler := api.NewGitOpsHandler(gitOpsReconciler)
+
+	// 8. Setup Routing
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("/api/v1/applications", func(w http.ResponseWriter, r *http.Request) {
+	// Helper to wrap handlers in Auth and RBAC
+	authAndRbac := func(resource string, next http.HandlerFunc) http.HandlerFunc {
+		return api.RBACMiddleware(orch, resource, next)
+	}
+	
+	// Pre-build the deploy handler wrapped with Admission Webhooks
+	deployWithAdmission := api.AdmissionMiddleware(handler.DeployApplicationHandler, api.PodSecurityStandard)
+
+	mux.Handle("/api/v1/applications", api.AuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		slog.Debug("Incoming API Request", "method", r.Method, "path", r.URL.Path)
 		switch r.Method {
 		case http.MethodGet:
-			handler.GetApplicationsHandler(w, r)
+			authAndRbac("applications", handler.GetApplicationsHandler)(w, r)
 		case http.MethodPost:
-			handler.DeployApplicationHandler(w, r)
+			authAndRbac("applications", deployWithAdmission)(w, r)
 		case http.MethodPatch:
-			handler.ScaleApplicationHandler(w, r)
+			authAndRbac("applications", handler.ScaleApplicationHandler)(w, r)
 		case http.MethodDelete:
-			handler.RemoveApplicationHandler(w, r)
+			authAndRbac("applications", handler.RemoveApplicationHandler)(w, r)
 		default:
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
-	})
+	})))
 
 	mux.HandleFunc("/api/v1/cluster/join", handler.JoinClusterHandler)
 	mux.HandleFunc("/ws", handler.WebSocketHandler)
+	mux.HandleFunc("/api/v1/gitops/sync", gitOpsHandler.WebhookHandler)
 
-	// 5. Wrap with CORS
+	// 9. Attach Observability Metrics
+	observability.RegisterClusterMetrics(orch)
+	mux.Handle("/metrics", observability.MetricsHandler())
+
+	// 10. Wrap with CORS
 	c := cors.New(cors.Options{
 		AllowedOrigins: []string{"*"},
 		AllowedMethods: []string{"GET", "POST", "PATCH", "DELETE", "OPTIONS"},
@@ -107,13 +164,13 @@ func main() {
 
 	// 6. Start Server
 	server := &http.Server{
-		Addr:         ":8080",
+		Addr:         ":" + httpPort,
 		Handler:      handlerWithCors,
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 15 * time.Second,
 	}
 
-	slog.Info("AuraDeploy Go Server running", "port", 8080)
+	slog.Info("AuraDeploy Go Server running", "port", httpPort)
 	if err := server.ListenAndServe(); err != nil {
 		slog.Error("Server crashed", "error", err)
 	}

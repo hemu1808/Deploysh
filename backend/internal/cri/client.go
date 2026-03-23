@@ -11,6 +11,8 @@ import (
 	"github.com/containerd/containerd/namespaces"
 	"github.com/containerd/containerd/oci"
 	"github.com/hemu1808/auradeploy/backend/internal/models"
+	"github.com/hemu1808/auradeploy/backend/internal/network"
+	"github.com/opencontainers/runtime-spec/specs-go"
 )
 
 // Client is a wrapper around the containerd client
@@ -18,10 +20,11 @@ type Client struct {
 	cli    *containerd.Client
 	logger *slog.Logger
 	ns     string
+	ipam   *network.IPAM
 }
 
 // NewClient initializes the connection to containerd socket
-func NewClient(socketPath string, namespace string, logger *slog.Logger) (*Client, error) {
+func NewClient(socketPath string, namespace string, ipam *network.IPAM, logger *slog.Logger) (*Client, error) {
 	// Connect to containerd's grpc socket
 	cli, err := containerd.New(socketPath)
 	if err != nil {
@@ -32,6 +35,7 @@ func NewClient(socketPath string, namespace string, logger *slog.Logger) (*Clien
 		cli:    cli,
 		logger: logger,
 		ns:     namespace,
+		ipam:   ipam,
 	}, nil
 }
 
@@ -48,7 +52,7 @@ func (c *Client) createContext() (context.Context, context.CancelFunc) {
 }
 
 // RunContainer pulls the image, creates the container, and starts the task
-func (c *Client) RunContainer(app models.Application) error {
+func (c *Client) RunContainer(app models.Application, mounts []specs.Mount) error {
 	ctx, cancel := c.createContext()
 	defer cancel()
 
@@ -67,12 +71,20 @@ func (c *Client) RunContainer(app models.Application) error {
 		envs = append(envs, fmt.Sprintf("%s=%s", e.Key, e.Value))
 	}
 
+	opts := []oci.SpecOpts{
+		oci.WithImageConfig(image),
+		oci.WithEnv(envs),
+	}
+	if len(mounts) > 0 {
+		opts = append(opts, oci.WithMounts(mounts))
+	}
+
 	container, err := c.cli.NewContainer(
 		ctx,
 		app.ID,
 		containerd.WithImage(image),
 		containerd.WithNewSnapshot(app.ID+"-snapshot", image),
-		containerd.WithNewSpec(oci.WithImageConfig(image), oci.WithEnv(envs)),
+		containerd.WithNewSpec(opts...),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create container %s: %w", app.ID, err)
@@ -83,6 +95,22 @@ func (c *Client) RunContainer(app models.Application) error {
 	task, err := container.NewTask(ctx, cio.NewCreator(cio.WithStdio))
 	if err != nil {
 		return fmt.Errorf("failed to create task for %s: %w", app.ID, err)
+	}
+
+	// Setup Network Namespace via Custom CNI
+	if c.ipam != nil {
+		ip, subnet, err := c.ipam.AllocateIP()
+		if err == nil {
+			netnsPath := fmt.Sprintf("/proc/%d/ns/net", task.Pid())
+			err = network.SetupContainerNetwork(app.ID, netnsPath, ip, subnet, c.ipam.GetGatewayIP())
+			if err != nil {
+				c.logger.Warn("Failed to setup CNI overlay network (falling back to containerd default)", "error", err)
+			} else {
+				c.logger.Info("Configured CNI Overlay IP", "id", app.ID, "ip", ip.String())
+				// We don't save the IP back to the model in this demo since it's fire-and-forget,
+				// but in a real system we'd propose an update to Raft here.
+			}
+		}
 	}
 
 	// Make sure we wait before calling start
@@ -144,6 +172,11 @@ func (c *Client) StopContainer(appID string) error {
 
 	if err := container.Delete(ctx, containerd.WithSnapshotCleanup); err != nil {
 		return err
+	}
+
+	if c.ipam != nil {
+		network.TeardownContainerNetwork(appID)
+		// Usually we'd release the IP back to IPAM here if we had tracked which IP was allocated to appID
 	}
 
 	return nil

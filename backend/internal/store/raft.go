@@ -99,6 +99,71 @@ func (s *Store) GetApplications() map[string]models.Application {
 	return clone
 }
 
+// GetNodes returns a copy of all nodes in the FSM state
+func (s *Store) GetNodes() map[string]models.Node {
+	s.fsm.mu.RLock()
+	defer s.fsm.mu.RUnlock()
+
+	clone := make(map[string]models.Node)
+	for k, v := range s.fsm.nodes {
+		clone[k] = v
+	}
+
+	return clone
+}
+
+// GetPVCs returns a copy of all PVCs in the FSM state
+func (s *Store) GetPVCs() map[string]models.PersistentVolumeClaim {
+	s.fsm.mu.RLock()
+	defer s.fsm.mu.RUnlock()
+
+	clone := make(map[string]models.PersistentVolumeClaim)
+	for k, v := range s.fsm.pvcs {
+		clone[k] = v
+	}
+
+	return clone
+}
+
+// GetPVs returns a copy of all PVs in the FSM state
+func (s *Store) GetPVs() map[string]models.PersistentVolume {
+	s.fsm.mu.RLock()
+	defer s.fsm.mu.RUnlock()
+
+	clone := make(map[string]models.PersistentVolume)
+	for k, v := range s.fsm.pvs {
+		clone[k] = v
+	}
+
+	return clone
+}
+
+// GetRoles returns a copy of all Roles in the FSM state
+func (s *Store) GetRoles() map[string]models.Role {
+	s.fsm.mu.RLock()
+	defer s.fsm.mu.RUnlock()
+
+	clone := make(map[string]models.Role)
+	for k, v := range s.fsm.roles {
+		clone[k] = v
+	}
+
+	return clone
+}
+
+// GetRoleBindings returns a copy of all RoleBindings in the FSM state
+func (s *Store) GetRoleBindings() map[string]models.RoleBinding {
+	s.fsm.mu.RLock()
+	defer s.fsm.mu.RUnlock()
+
+	clone := make(map[string]models.RoleBinding)
+	for k, v := range s.fsm.roleBindings {
+		clone[k] = v
+	}
+
+	return clone
+}
+
 // SetApplication proposes a state change to Raft: creating or replacing an Application
 func (s *Store) SetApplication(app models.Application) error {
 	if s.raft.State() != raft.Leader {
@@ -144,6 +209,154 @@ func (s *Store) DeleteApplication(appID string) error {
 		return err
 	}
 
+	return nil
+}
+
+// SetNode proposes a state change to Raft: creating or replacing a Node
+func (s *Store) SetNode(node models.Node) error {
+	if s.raft.State() != raft.Leader {
+		return fmt.Errorf("not the leader")
+	}
+
+	c := command{
+		Type: SetNodeCommand,
+		Node: node,
+	}
+
+	b, err := json.Marshal(c)
+	if err != nil {
+		return err
+	}
+
+	future := s.raft.Apply(b, 5*time.Second)
+	if err := future.Error(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// DeleteNode proposes a state change to Raft: removing a Node
+func (s *Store) DeleteNode(nodeID string) error {
+	if s.raft.State() != raft.Leader {
+		return fmt.Errorf("not the leader")
+	}
+
+	c := command{
+		Type: DeleteNodeCommand,
+		ID:   nodeID,
+	}
+
+	b, err := json.Marshal(c)
+	if err != nil {
+		return err
+	}
+
+	future := s.raft.Apply(b, 5*time.Second)
+	if err := future.Error(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// Volume Commands
+
+func (s *Store) SetPVC(pvc models.PersistentVolumeClaim) error {
+	if s.raft.State() != raft.Leader {
+		return fmt.Errorf("not the leader")
+	}
+	c := command{Type: SetPVCCommand, PVC: pvc}
+	b, _ := json.Marshal(c)
+	if err := s.raft.Apply(b, 5*time.Second).Error(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Store) DeletePVC(id string) error {
+	if s.raft.State() != raft.Leader {
+		return fmt.Errorf("not the leader")
+	}
+	c := command{Type: DeletePVCCommand, ID: id}
+	b, _ := json.Marshal(c)
+	if err := s.raft.Apply(b, 5*time.Second).Error(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Store) SetPV(pv models.PersistentVolume) error {
+	if s.raft.State() != raft.Leader {
+		return fmt.Errorf("not the leader")
+	}
+	c := command{Type: SetPVCommand, PV: pv}
+	b, _ := json.Marshal(c)
+	if err := s.raft.Apply(b, 5*time.Second).Error(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Store) DeletePV(id string) error {
+	if s.raft.State() != raft.Leader {
+		return fmt.Errorf("not the leader")
+	}
+	c := command{Type: DeletePVCommand, ID: id}
+	b, _ := json.Marshal(c)
+	if err := s.raft.Apply(b, 5*time.Second).Error(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// RBAC Commands
+
+func (s *Store) SetRole(role models.Role) error {
+	if s.raft.State() != raft.Leader {
+		return fmt.Errorf("not the leader")
+	}
+	c := command{Type: SetRoleCommand, Role: role}
+	b, _ := json.Marshal(c)
+	if err := s.raft.Apply(b, 5*time.Second).Error(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Store) DeleteRole(id string) error {
+	if s.raft.State() != raft.Leader {
+		return fmt.Errorf("not the leader")
+	}
+	c := command{Type: DeleteRoleCommand, ID: id}
+	b, _ := json.Marshal(c)
+	if err := s.raft.Apply(b, 5*time.Second).Error(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Store) SetRoleBinding(rb models.RoleBinding) error {
+	if s.raft.State() != raft.Leader {
+		return fmt.Errorf("not the leader")
+	}
+	c := command{Type: SetRoleBindingCommand, RoleBinding: rb}
+	b, _ := json.Marshal(c)
+	if err := s.raft.Apply(b, 5*time.Second).Error(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Store) DeleteRoleBinding(id string) error {
+	if s.raft.State() != raft.Leader {
+		return fmt.Errorf("not the leader")
+	}
+	c := command{Type: DeleteRoleBindingCommand, ID: id}
+	b, _ := json.Marshal(c)
+	if err := s.raft.Apply(b, 5*time.Second).Error(); err != nil {
+		return err
+	}
 	return nil
 }
 

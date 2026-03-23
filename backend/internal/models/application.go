@@ -9,6 +9,11 @@ import (
 	"gorm.io/gorm"
 )
 
+var (
+	ErrPrivilegedContainer = errors.New("PodSecurity Standard Violation: Privileged containers (RUN_AS_ROOT) are not allowed")
+	ErrPrivilegedPort      = errors.New("PodSecurity Standard Violation: Binding to host ports < 1024 is not allowed")
+)
+
 // ApplicationStatus defines the current state of an application
 type ApplicationStatus string
 
@@ -37,6 +42,12 @@ type PortMapping struct {
 	ContainerPort int `json:"containerPort"`
 }
 
+// VolumeMount represents a PVC mounted into a container
+type VolumeMount struct {
+	ClaimID   string `json:"claimId"`
+	MountPath string `json:"mountPath"`
+}
+
 // Replicas defines the current vs desired instances
 type Replicas struct {
 	Current int `json:"current"`
@@ -58,6 +69,7 @@ type Application struct {
 	EnvVars     EnvVarsJSON       `gorm:"type:text" json:"envVars,omitempty"`
 	Ports       PortsJSON         `gorm:"type:text" json:"ports,omitempty"`
 	Placements  map[string]string `gorm:"type:text" json:"placements,omitempty"` // replicaID -> NodeID
+	VolumeMounts VolumeMountsJSON `gorm:"type:text" json:"volumeMounts,omitempty"`
 	
 	CreatedAt   int64           `json:"createdAt"`
 	UpdatedAt   int64           `json:"-"`
@@ -99,6 +111,10 @@ func (e *EnvVarsJSON) Scan(value interface{}) error { return scanJSON(value, e) 
 type PortsJSON []PortMapping
 func (p PortsJSON) Value() (driver.Value, error) { return json.Marshal(p) }
 func (p *PortsJSON) Scan(value interface{}) error { return scanJSON(value, p) }
+
+type VolumeMountsJSON []VolumeMount
+func (v VolumeMountsJSON) Value() (driver.Value, error) { return json.Marshal(v) }
+func (v *VolumeMountsJSON) Scan(value interface{}) error { return scanJSON(value, v) }
 
 // Generic JSON scanner
 func scanJSON(value interface{}, dest interface{}) error {

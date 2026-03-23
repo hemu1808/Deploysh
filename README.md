@@ -1,100 +1,105 @@
-# 🚀 AuraDeploy
+# AuraDeploy: Distributed Orchestrator
 
-AuraDeploy is a lightweight, self-healing container orchestration platform designed to simplify application deployments, scaling, and real-time telemetry monitoring. By abstracting the complexity of heavy orchestrators like Kubernetes, AuraDeploy provides developers with a sleek, real-time dashboard and robust backend control plane.
+AuraDeploy is a high-availability, production-grade container orchestration system designed to abstract away the complexity of Kubernetes while retaining the reliability of Raft consensus, natively integrated OCI-compliant container runtimes, and declarative GitOps pipelines.
 
----
+This orchestrator is built purely in Go, acting as a sandbox and study of distributed system engineering.
 
-## 🏗️ System Architecture
+## Overall System Architecture
 
-AuraDeploy employs a decoupled, event-driven architecture utilizing a modern React frontend and a highly concurrent Go backend. 
+The overarching architecture of AuraDeploy is split into decoupled sub-components interacting over an internal Finite State Machine (FSM) acting as the single source of truth.
 
-```mermaid
-sequenceDiagram
-    participant UI as React Frontend (Vite)
-    participant REST as Go REST API (chi/mux)
-    participant WS as Go WebSocket Hub
-    participant Orch as GORM Orchestrator
-    participant DB as SQLite DB
+### 1. Raft Consensus Layer (High Availability)
+The single-node backend is augmented by an embedded HashiCorp `raft` distributed Key-Value store. The master nodes handle leadership elections, log replications, and robust FSM snapshots. The API handlers gracefully redirect commands to the active leader, providing a true Active-Passive HA Control Plane without relying on an external DB like PostgreSQL or etcd.
 
-    %% Deployment Flow
-    UI->>REST: POST /api/v1/applications (Deploy)
-    REST->>Orch: DeployApplication()
-    Orch->>DB: INSERT App details (Status: Deploying)
-    DB-->>Orch: Success
-    Orch->>WS: Broadcast updated App Array
-    WS-->>UI: WsMessage (SYNC_APPS)
-    REST-->>UI: 201 Created
+### 2. CRI-O / containerd Integration
+Rather than executing generic Docker API CLI commands, AuraDeploy acts as a native Container Runtime Interface (CRI) client leveraging `containerd/oci`. It downloads and stages OCI images, mounts network namespaces manually via `netlink`, injects CGroups limits, and utilizes underlying snapshotters for granular layer isolation.
 
-    %% Background Simulation loop
-    loop Background Ticker (Every 2s)
-        Orch->>DB: Fetch active apps
-        Note over Orch: Simulate lifecycle <br/>(Deploying -> Healthy / Unhealthy)
-        Note over Orch: Generate CPU/Mem Metrics & Logs
-        Orch->>DB: UPDATE App state & JSON logs
-        Orch->>WS: Broadcast updated App Array
-        WS-->>UI: Real-time telemetry update
-    end
-```
+### 3. Custom Scheduler 
+A dedicated Go-routine scheduling loop runs on the leader node, monitoring the Raft array for pending Application Replicas lacking a `nodeID`.
+*   **Predicates:** Filters nodes based on hard constraints (e.g., `HasSufficientResources`, `VolumeNodeAffinity`).
+*   **Priorities:** Scores mathematically viable nodes (e.g., `LeastAllocated` algorithm to ensure an optimal spread of CPU/Memory footprints across the cluster).
+Selected Node targets are broadcast into the Raft log for respective worker nodes to claim and execute.
 
-### Flow Breakdown
-1. **Frontend Interactions**: The user performs an action (Deploy, Scale, Remove) via the React dashboard.
-2. **REST API**: The Go backend receives the request, parses the payload (including `EnvVars` and `PortMappings`), and routes it to the Orchestrator service.
-3. **Database Operations**: The Orchestrator leverages **GORM** to interact with a local **SQLite database**, ensuring that application states, logs, and metrics persist safely across server restarts.
-4. **Real-time Telemetry**: A continuous Go routine (`simulationLoop`) acts as the background worker. It monitors the database, updating application status (mocking Docker starts/crashes) and generating CPU/Memory metrics.
-5. **WebSocket Hub**: Every time the Orchestrator mutates state, it broadcasts the entire application fleet through a channel to the WebSocket Hub. The hub streams `SYNC_APPS` payloads to all connected React clients.
-6. **UI Hydration**: The React frontend uses `@tanstack/react-query` to ingest the WebSocket streams, patching the local cache instantly and triggering seamless DOM repaints without HTTP polling.
+### 4. Custom Network Overlay (CNI)
+Operating natively on Linux environments, worker nodes establish a robust multi-host networking mesh interface.
+*   **IPAM:** Deterministic `/24` subnet slicing out of an ephemeral cluster-wide `/16` CIDR.
+*   **Linux Bridge & VXLAN:** Inter-node communication operates by attaching physical Host Bridges (`aura0`) to VXLAN overlays (`vxlan0`).
+*   **Network Namespaces:** The CRI worker isolates active containers via isolated `veth` pairs spliced between the host bridge and the container namespace.
+*   **Service Discovery:** Applications register against an integrated dummy UDP DNS server reacting dynamically to FSM placement updates to yield service resolution.
 
----
+### 5. Custom CSI (Storage Provisioner)
+AuraDeploy executes its own Container Storage Interface logic to persist file architectures outside the volatile lifecycle of transient containers.
+*   **Local Volume Controller:** An embedded reconciliation loop that provisions localized host-paths mapping 1:1 against Persistent Volume Claims (PVCs) requesting nodes.
+*   **Volume Binding:** Containers get fully resolved OCI Bind Mounts injected smoothly into their spec templates by the CRI daemon.
 
-## 💻 System Design
+### 6. API Security & Admission Control
+A robust, internally native role-managed security firewall restricts the API multiplexer logic.
+*   **Authentication Middleware:** Generic JWT Bearer token extraction and user identification.
+*   **RBAC Mapping:** Authorizes verified Subjects against defined FSM `Roles` & `RoleBindings` determining specific access rights natively (comparing HTTP Verbs against allowed Resource Endpoints).
+*   **Admission Controller:** Validating Webhooks intercept active deployments to strip Privileged Containers, immediately rejecting payloads that attempt to attach to the root filesystem or override the `RUN_AS_ROOT` PodSecurityStandard constraints.
 
-### 1. Backend Core (`go`)
+### 7. GitOps Declarative Reconciler
+Applications can be managed imperatively using localized UI/API operations, or pulled directly declaratively via the `GitOps` Engine.
+*   **YAML Parser:** Intelligently reads Kubernetes-style custom definitions mapping `kind: Application` schemas using `yaml.v3`.
+*   **Drift Check:** Actively diff-checks recorded local cluster states versus remote declarative definitions, enforcing immediate redeployments to heal drifted ENV vars, corrupt images, or invalid replica settings seamlessly.
 
-*   **Robust WebSockets**: Handled via `gorilla/websocket`. The implementation includes production-level Ping/Pong heartbeats and Read/Write deadlines. If a React client abruptly drops the connection, the Go server catches the timeout and gracefully closes the Goroutine, preventing memory leaks and unhandled TCP panic crashes.
-*   **Data Persistence (GORM)**: The platform uses `gorm.io/driver/sqlite`. Because complex arrays (like `[]Metric` and `[]EnvVar`) aren't natively supported by standard SQLite, the domain models implement custom `Valuer` and `Scanner` interfaces to automatically marshal/unmarshal these slices into SQLite `TEXT` columns as JSON.
-*   **Structured Logging**: Utilizes Go 1.21's `log/slog` standard library package to output clean, structured, and parseable JSON logs detailing API method hits, client connections, and orchestrator actions.
-
-### 2. Frontend Core (`React` + `Vite`)
-
-*   **State Synchronization**: All API fetches execute through native `axios`. However, the app relies on the `wsService` hook heavily. Instead of writing complex reducers, incoming WebSocket broadcasts are fed directly into the React Query client (`queryClient.setQueryData`), ensuring the UI is precisely matched to the backend database instantly.
-*   **Glassmorphism UI**: The aesthetic ditches primitive box-shadows for deep, multi-layered Glassmorphism. The UI utilizes strict Tailwind classes: `backdrop-blur-md`, `bg-white/5`, and structural gradient borders to achieve a frosted, premium SaaS feel. 
-*   **Context API Notifications**: All user events (Scale, Deploy, Error) trigger a custom `useToast` Context Hook. This spawns auto-dismissing layout-animated toast notifications layered above the DOM tree via a fixed transparent container.
+### 8. Observability Stack
+Visibility traces are embedded directly into the core networking loops.
+*   **Prometheus Metrics:** A generalized prometheus HTTP exporter exposing custom FSM Gauges (e.g., `auradeploy_total_applications` / deployments counted).
+*   **OpenTelemetry:** Distributed structural context traces registered into the routing pipeline structure (`go.opentelemetry.io/otel`).
+*   **Event Recorder:** Pushing structured historical cluster-mutations over standard I/O (simulating Kubernetes specific `Events`).
 
 ---
 
-## 🚀 Running Locally
+## Requirements
 
-AuraDeploy requires two terminals to run simultaneously: one for the Go Orchestrator backend, and one for the React Vite frontend.
+*   **Go** (1.20+)
+*   **Node.js** (v18+) & **npm**
 
-### Prerequisites
-- [Go](https://go.dev/dl/) (1.21+)
-- [Node.js](https://nodejs.org/) (18+)
+## Getting Started
 
-### 1. Start the Go Backend
-The backend initializes the SQLite database automatically on boot.
+### 1. Start the Backend (AuraDeploy FSM Leader)
+
+Open a terminal and navigate to the `backend` directory to run the seed node:
 
 ```bash
 cd backend
-go mod tidy
-go run ./cmd/server/main.go
+$env:RAFT_NODE_ID="node1"
+$env:RAFT_BIND_ADDR="127.0.0.1:9000"
+$env:PORT="8080"
+$env:RAFT_BOOTSTRAP="true"
+go run ./cmd/server
 ```
-*The API will start on `http://localhost:8080/api/v1` and the WS hub on `ws://localhost:8080/ws`.*
 
-### 2. Start the React Frontend
+**Join a Worker Node:** (Optional)
+Open another terminal:
+```bash
+cd backend
+$env:RAFT_NODE_ID="node2"
+$env:RAFT_BIND_ADDR="127.0.0.1:9001"
+$env:PORT="8081"
+go run ./cmd/server -join 127.0.0.1:8080
+```
+
+### 2. Start the Frontend (Dashboard)
+
+Open a new terminal at the root of the project to run the React dashboard:
 
 ```bash
-# In the root project directory:
 npm install
 npm run dev
 ```
-*The web dashboard will be available at `http://localhost:5173`. You can also run `npm run build` to compile the production-ready static assets.*
 
----
+## Verification & Testing
 
-## 🛣️ Future Roadmap
+To verify the platform is running successfully:
 
-This V1 implementation perfectly simulates a robust control plane. The natural next steps involve tying the Orchestrator service directly into a real container runtime.
+1.  **Dashboard UI:** Open your browser to [http://localhost:5173](http://localhost:5173). You should see the AuraDeploy dashboard.
+2.  **API Health / Cluster State:** Use `curl` to check the backend leader's state directly:
+    ```bash
+    # (Replace endpoint with actual status endpoint if known, e.g. /status or check applications)
+    curl http://localhost:8080/applications
+    ```
 
-1.  **Docker SDK Integration**: Swap the random `simulationLoop` with real calls to the Docker Daemon API (via `docker/docker/client`) to actually spin up containers from requested images.
-2.  **Authentication**: Add JWT-based login wrapping the REST API and WebSocket connection handshakes.
-3.  **Reverse Proxy**: Implement dynamic routing (like Traefik) so that deployed applications are assignable to real subdomains (e.g., `app-user-service.auradeploy.local`). 
+###
+I built AuraDeploy to challenge the assumption that container orchestration requires heavyweight control planes. While Kubernetes dominates production, its complexity creates massive operational overhead for smaller deployments. I wanted to prove that a single Go binary with SQLite could achieve the same core guarantees—self-healing, real-time state synchronization, and declarative scaling—through careful systems design rather than distributed consensus. The project explores how far you can push a monolithic architecture before hitting fundamental limits.
